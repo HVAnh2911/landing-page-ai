@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(tree \"c:\\\\Du An\\\\trangdich\" /f)"
+    ]
+  }
+}
