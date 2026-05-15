@@ -1,7 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "PowerShell(tree \"c:\\\\Du An\\\\trangdich\" /f)"
+      "PowerShell(tree \"c:\\\\Du An\\\\trangdich\" /f)",
+      "Bash(git push *)",
+      "Read(//c/Users/Admin/.ssh/**)",
+      "Bash(ssh-add -l)"
     ]
   }
 }

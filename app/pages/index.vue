@@ -10,13 +10,36 @@ useSeoMeta({
   description: 'Nhập thông tin doanh nghiệp, AI tạo trang web chuyên nghiệp trong 30 giây. Miễn phí, không cần kỹ thuật.',
 })
 
-const router = useRouter()
-const store = useGeneratorStore()
+const router   = useRouter()
+const store    = useGeneratorStore()
 const { currentPage } = storeToRefs(store)
+const supabase = useSupabaseClient()
+const { isLoggedIn } = useAuth()
 
-// Tự động chuyển sang /preview khi tạo xong
-watch(currentPage, (page) => {
-  if (page) router.push('/preview')
+// Tự động lưu vào DB và chuyển sang /preview khi generate xong
+watch(currentPage, async (page) => {
+  if (!page) return
+
+  // Nếu đã đăng nhập thì tự động lưu vào DB (chưa publish)
+  if (isLoggedIn.value) {
+    try {
+      const { data: sessionData } = await supabase.auth.getSession()
+      const token = sessionData.session?.access_token ?? ''
+      if (token) {
+        const res = await $fetch<{ id: string; slug: string; url: string }>('/api/publish', {
+          method: 'POST',
+          body: { page, publish: false },
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        // Gán id vào store để Publish sau này chỉ UPDATE thay vì INSERT mới
+        store.currentPage = { ...page, id: res.id }
+      }
+    } catch (e) {
+      console.error('[AutoSave] lỗi lưu trang:', e)
+    }
+  }
+
+  router.push('/preview')
 })
 </script>
 

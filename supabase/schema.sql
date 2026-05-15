@@ -12,6 +12,7 @@ create table if not exists public.profiles (
   email       text not null,
   full_name   text,
   plan        text not null default 'free' check (plan in ('free', 'pro', 'business')),
+  is_admin    boolean not null default false,
   pages_used  int  not null default 0,
   created_at  timestamptz not null default now(),
   updated_at  timestamptz not null default now()
@@ -105,11 +106,13 @@ create policy "profiles_self" on public.profiles
   using (auth.uid() = id)
   with check (auth.uid() = id);
 
--- Pages: owner full access; published pages are public-readable
+-- Pages: owner full access; admin sees all; published pages are public-readable
 alter table public.pages enable row level security;
 create policy "pages_owner" on public.pages
   using (auth.uid() = user_id)
   with check (auth.uid() = user_id);
+create policy "pages_admin" on public.pages
+  using (exists (select 1 from public.profiles where id = auth.uid() and is_admin = true));
 create policy "pages_public_read" on public.pages
   for select using (is_published = true);
 

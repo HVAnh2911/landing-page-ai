@@ -8,10 +8,12 @@ import { useHtmlExport } from '~/composables/useHtmlExport'
 
 definePageMeta({ layout: false })
 
-const router = useRouter()
-const store  = useGeneratorStore()
+const router   = useRouter()
+const store    = useGeneratorStore()
 const { currentPage } = storeToRefs(store)
-const { download } = useHtmlExport()
+const { download }    = useHtmlExport()
+const { isLoggedIn } = useAuth()
+const supabase = useSupabaseClient()
 
 if (!currentPage.value) router.replace('/')
 
@@ -31,9 +33,13 @@ const isConstrained = computed(() => device.value !== 'desktop')
 const showUpgrade = ref(false)
 
 // ── Payment QR modal ──
-const showPayment   = ref(false)
-const paymentTimer  = ref(0)
-let   _payInterval: ReturnType<typeof setInterval> | null = null
+const showPayment    = ref(false)
+const paymentTimer   = ref(0)
+const paymentStatus  = ref<'waiting' | 'checking' | 'success' | 'error'>('waiting')
+const orderCode      = ref('')
+
+let _payInterval:  ReturnType<typeof setInterval> | null = null
+let _pollInterval: ReturnType<typeof setInterval> | null = null
 
 const timerDisplay = computed(() => {
   const m = Math.floor(paymentTimer.value / 60).toString().padStart(2, '0')
@@ -41,26 +47,58 @@ const timerDisplay = computed(() => {
   return `${m}:${s}`
 })
 
+// Tạo mã đơn hàng unique: TD + timestamp 6 chữ số cuối
+function genOrderCode() {
+  return 'TD' + Date.now().toString().slice(-6)
+}
+
 function openPayment() {
-  showUpgrade.value  = false
-  showPayment.value  = true
-  paymentTimer.value = 5 * 60
+  showUpgrade.value   = false
+  showPayment.value   = true
+  paymentStatus.value = 'waiting'
+  orderCode.value     = genOrderCode()
+  paymentTimer.value  = 5 * 60
+
+  // Đếm ngược
   _payInterval = setInterval(() => {
     paymentTimer.value--
     if (paymentTimer.value <= 0) closePayment()
   }, 1000)
+
+  // Poll SePay mỗi 4 giây
+  _pollInterval = setInterval(async () => {
+    if (paymentStatus.value === 'success') return
+    paymentStatus.value = 'checking'
+    try {
+      const res = await $fetch<{ paid: boolean }>('/api/check-payment', {
+        query: { code: orderCode.value },
+      })
+      if (res.paid) {
+        paymentStatus.value = 'success'
+        stopIntervals()
+        if (!currentPage.value) return
+        await nextTick()
+        download(currentPage.value)
+        // Đóng modal sau 1.5s để user thấy thông báo thành công
+        setTimeout(() => { showPayment.value = false }, 1500)
+      } else {
+        paymentStatus.value = 'waiting'
+      }
+    } catch {
+      paymentStatus.value = 'waiting'
+    }
+  }, 4000)
+}
+
+function stopIntervals() {
+  if (_payInterval)  { clearInterval(_payInterval);  _payInterval  = null }
+  if (_pollInterval) { clearInterval(_pollInterval); _pollInterval = null }
 }
 
 function closePayment() {
-  if (_payInterval) { clearInterval(_payInterval); _payInterval = null }
+  stopIntervals()
   showPayment.value = false
-}
-
-async function confirmPayment() {
-  closePayment()
-  if (!currentPage.value) return
-  await nextTick()
-  download(currentPage.value)
+  paymentStatus.value = 'waiting'
 }
 
 // ── Publish ──
@@ -71,15 +109,25 @@ const publishError = ref('')
 
 async function handlePublish() {
   if (!currentPage.value) return
-  publishing.value  = true
+
+  if (!isLoggedIn.value) {
+    await navigateTo('/login?redirect=/preview')
+    return
+  }
+
+  publishing.value   = true
   publishError.value = ''
   try {
+    const { data: sessionData } = await supabase.auth.getSession()
+    const token = sessionData.session?.access_token ?? ''
+
     const res = await $fetch<{ url: string; slug: string }>('/api/publish', {
       method: 'POST',
-      body: { page: currentPage.value },
+      body: { page: currentPage.value, publish: true },
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
     })
-    publishedUrl.value  = res.url
-    showPublishSuccess.value = true
+    publishedUrl.value        = res.url
+    showPublishSuccess.value  = true
   } catch (e: unknown) {
     publishError.value = e instanceof Error ? e.message : 'Lỗi khi publish'
   } finally {
@@ -163,7 +211,6 @@ async function copyLink() {
             <path d="M7 17h7M10.5 13.25V17" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
           </svg>
           <span class="text-[9px] font-semibold leading-none">{{ d.label }}</span>
-          <span v-if="device === d.id" class="absolute bottom-0.5 left-1/2 h-1 w-1 -translate-x-1/2 rounded-full bg-blue-500" />
         </button>
       </div>
 
@@ -338,53 +385,70 @@ async function copyLink() {
 
           <!-- QR code -->
           <div class="flex flex-col items-center px-5 py-5">
-            <div class="mb-3 overflow-hidden rounded-xl border-2 border-blue-100 p-2 shadow-sm">
-              <img
-                src="https://img.vietqr.io/image/MB-0123456789-qr_only.png?amount=99000&addInfo=TrangDich%20Pro&accountName=TRANG%20DICH%20VN"
-                alt="QR thanh toán"
-                class="h-44 w-44 object-contain"
-                loading="eager"
-              />
+
+            <!-- Trạng thái thành công -->
+            <div v-if="paymentStatus === 'success'" class="flex flex-col items-center py-6 gap-3">
+              <div class="flex h-16 w-16 items-center justify-center rounded-full bg-green-100">
+                <svg class="h-8 w-8 text-green-600" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/>
+                </svg>
+              </div>
+              <p class="text-base font-extrabold text-green-700">Thanh toán thành công!</p>
+              <p class="text-xs text-gray-400">File HTML đang được tải xuống...</p>
             </div>
 
-            <!-- Bank info -->
-            <div class="w-full space-y-2 rounded-xl bg-gray-50 px-4 py-3 text-xs">
-              <div class="flex items-center justify-between">
-                <span class="text-gray-400">Ngân hàng</span>
-                <span class="font-bold text-gray-800">MB Bank</span>
+            <template v-else>
+              <div class="mb-3 overflow-hidden rounded-xl border-2 border-blue-100 p-2 shadow-sm">
+                <img
+                  :src="`https://img.vietqr.io/image/VIB-366760872-qr_only.png?amount=99000&addInfo=${orderCode}&accountName=HOANG%20VAN%20ANH`"
+                  alt="QR thanh toán"
+                  class="h-44 w-44 object-contain"
+                  loading="eager"
+                />
               </div>
-              <div class="flex items-center justify-between">
-                <span class="text-gray-400">Số tài khoản</span>
-                <span class="font-bold text-gray-800 tracking-wide">0123 456 789</span>
-              </div>
-              <div class="flex items-center justify-between">
-                <span class="text-gray-400">Chủ TK</span>
-                <span class="font-bold text-gray-800">TRANG DICH VN</span>
-              </div>
-              <div class="flex items-center justify-between">
-                <span class="text-gray-400">Số tiền</span>
-                <span class="font-extrabold text-blue-600">99.000 ₫</span>
-              </div>
-              <div class="flex items-center justify-between">
-                <span class="text-gray-400">Nội dung</span>
-                <span class="font-bold text-gray-800">TrangDich Pro</span>
-              </div>
-            </div>
 
-            <p class="mt-3 text-center text-[11px] text-gray-400">
-              File HTML sẽ tự động tải xuống sau khi<br>bạn xác nhận đã chuyển khoản
-            </p>
+              <!-- Bank info -->
+              <div class="w-full space-y-2 rounded-xl bg-gray-50 px-4 py-3 text-xs">
+                <div class="flex items-center justify-between">
+                  <span class="text-gray-400">Ngân hàng</span>
+                  <span class="font-bold text-gray-800">VIB Bank</span>
+                </div>
+                <div class="flex items-center justify-between">
+                  <span class="text-gray-400">Số tài khoản</span>
+                  <span class="font-bold text-gray-800 tracking-wide">366 760 872</span>
+                </div>
+                <div class="flex items-center justify-between">
+                  <span class="text-gray-400">Chủ TK</span>
+                  <span class="font-bold text-gray-800">HOANG VAN ANH</span>
+                </div>
+                <div class="flex items-center justify-between">
+                  <span class="text-gray-400">Số tiền</span>
+                  <span class="font-extrabold text-blue-600">99.000 ₫</span>
+                </div>
+                <div class="flex items-center justify-between">
+                  <span class="text-gray-400">Nội dung CK</span>
+                  <span class="font-bold text-blue-700 tracking-wide">{{ orderCode }}</span>
+                </div>
+              </div>
+
+              <!-- Trạng thái polling -->
+              <div class="mt-3 flex items-center gap-1.5 text-[11px]"
+                :class="paymentStatus === 'checking' ? 'text-blue-500' : 'text-gray-400'"
+              >
+                <svg v-if="paymentStatus === 'checking'" class="h-3 w-3 animate-spin" fill="none" viewBox="0 0 24 24">
+                  <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+                  <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                </svg>
+                <svg v-else class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                  <circle cx="12" cy="12" r="10"/><path stroke-linecap="round" d="M12 6v6l4 2"/>
+                </svg>
+                {{ paymentStatus === 'checking' ? 'Đang kiểm tra giao dịch...' : 'Tự động xác nhận sau khi chuyển khoản' }}
+              </div>
+            </template>
           </div>
 
           <!-- Actions -->
-          <div class="border-t border-gray-100 px-5 pb-5">
-            <button
-              class="w-full rounded-xl py-3 text-sm font-bold text-white shadow-sm transition hover:opacity-90"
-              style="background:linear-gradient(135deg,#16a34a,#15803d)"
-              @click="confirmPayment"
-            >
-              ✓ Tôi đã chuyển khoản — Tải HTML
-            </button>
+          <div v-if="paymentStatus !== 'success'" class="border-t border-gray-100 px-5 pb-5">
             <button
               class="mt-2 w-full rounded-xl py-2 text-xs font-medium text-gray-400 transition hover:text-gray-600"
               @click="closePayment"
